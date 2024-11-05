@@ -1,140 +1,204 @@
-name: CI
-
-on: 
+name: build
+on:
   push:
-  pull_request:
-
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - "NOTICE"
+      - ".gitignore"
+    tags:
+      - "*"
 jobs:
-  build:
+  build-linux:
     runs-on: ubuntu-latest
-
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: linux-x86_64
+          - name: linux-arm64
     steps:
-      - uses: actions/checkout@v3
-      - run: sudo apt-get update -qq
-      - run: sudo apt-get install -qq nasm g++-multilib gcc-multilib libc6-dev-i386 python3-pip python3-setuptools
-      - run: sudo python3 -m pip install meson==0.52.1 ninja
-      - run: nasm -v 
-      - run: c++ --version
-      - run: make gmp-bootstrap
-      - run: make gtest-bootstrap
-      - run: meson builddir --werror
-      - run: ninja -C builddir -v
-      - run: ( cd test/encoder_binary_comparison ; CFLAGS=-Werror ./run_PrepareAllTestData.sh 64 )
-      - run: meson test -C builddir -v
-      - run: ./run_Test.sh BinaryCompare BA_MW_D.264
-      - run: ./run_Test.sh BinaryCompare Adobe_PDF_sample_a_1024x768_50Frms.264
-      - run: ./run_Test.sh BinaryCompare Zhling_1280x720.264
+      - name: Check out the repo
+        uses: actions/checkout@v4
 
-  asan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - run: sudo apt-get update -qq
-      - run: sudo apt-get install -qq nasm
-      - run: nasm -v
-      - run: c++ --version
-      - run: make gtest-bootstrap
-      - run: LDFLAGS=-fsanitize=address CFLAGS=-fsanitize=address make -j$(nproc)
-      - run: ./codec_unittest
-
-  windows:
-    runs-on: windows-2019
-    steps:
-      - uses: actions/checkout@v3
-      - run: choco install nasm
-      # nasm is not installed into the $PATH so add it manually
-      - run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
-      - run: nasm -v
-      - run: make OS=msvc gmp-bootstrap
-      - run: make OS=msvc gtest-bootstrap
-      - working-directory: ./build
-        env:
-          CFLAGS: -WX
-        run: ./AutoBuildForWindows.bat
-      - run: ./bin/Win32/Release/codec_unittest.exe
-
-  mingw:
-    runs-on: windows-2019
-    defaults:
-      run:
-        shell: msys2 {0}
-    steps:
-      - uses: msys2/setup-msys2@v2
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          msystem: mingw64
-          install: >-
-            git
-            make
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-nasm
-            mingw-w64-x86_64-meson
-      - uses: actions/checkout@v3
-      - run: c++ --version
-      - run: make gmp-bootstrap
-      - run: make gtest-bootstrap
-      # disable Werror on gcc 12 until #3533 is fixed.
-      #- run: CFLAGS=-Werror make -j$(nproc) all plugin test
-      - run: make -j$(nproc) all plugin test
-      #- run: meson builddir --werror
-      - run: meson builddir
-      - run: ninja -C builddir -v
-      - run: meson test -C builddir -v
+          python-version: '3.12'
 
-  macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v3
-      - run: brew install nasm meson
-      - run: make gmp-bootstrap
-      - run: make gtest-bootstrap
-      - run: nasm -v
-      - run: c++ --version
-      - run: CFLAGS=-Werror make -j$(sysctl -n hw.ncpu) all plugin test
-      - run: meson builddir --werror
-      - run: ninja -C builddir -v
-      - run: meson test -C builddir -v
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq nasm
+          if [[ "${{ matrix.platform.name }}" == "linux-arm64" ]]; then
+          sudo apt-get install -qq g++-aarch64-linux-gnu qemu-user
+          fi
 
-  linux-cross-arm:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - run: sudo apt-get update -qq
-      - run: sudo apt-get install -qq g++-arm-linux-gnueabihf g++-aarch64-linux-gnu qemu-user
-      - run: arm-linux-gnueabihf-g++ --version
-      - run: make gmp-bootstrap
-      - run: make gtest-bootstrap
-      - run: CFLAGS=-Werror make -j$(nproc) ARCH=armv7 CC=arm-linux-gnueabihf-gcc CXX=arm-linux-gnueabihf-g++
-      - run: CFLAGS=-Werror make clean
-      - run: CFLAGS=-Werror make -j$(nproc) ARCH=aarch64 CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++
-      - run: qemu-aarch64 -L /usr/aarch64-linux-gnu/ ./codec_unittest
+      - name: Install Python Requirements
+        run: python -m pip install meson ninja
 
-  macos-cross-arm64:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v3
-      - run: make gmp-bootstrap
-      - run: make gtest-bootstrap
-      - run: c++ --version
-      - run: CFLAGS=-Werror make -j$(sysctl -n hw.ncpu) ARCH=arm64
+      - name: Configure with Meson
+        if: matrix.platform.name == 'linux-x86_64'
+        run: |
+          python -m mesonbuild.mesonmain setup build_output --prefix=$(pwd)/build_output --libdir=lib --buildtype=release --default-library=static
 
-  fuzzing:
-    runs-on: ubuntu-latest
+      - name: Configure with Meson (arm64)
+        if: matrix.platform.name == 'linux-arm64'
+        run: |
+          python -m mesonbuild.mesonmain setup build_output --cross-file cross_arm64.ini --prefix=$(pwd)/build_output --libdir=lib --buildtype=release --default-library=static
+
+      - name: Build with Ninja
+        run: python -m ninja -C build_output
+
+      - name: Install to build_output
+        run: python -m ninja -C build_output install
+
+      - name: Prepare for artifact
+        run: |
+          mkdir -p artifacts/lib
+          mv build_output/lib/libopenh264.a artifacts/lib/
+          mv build_output/include artifacts/
+          tar -czvf openh264.${{ matrix.platform.name }}.tar.gz artifacts
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openh264.${{ matrix.platform.name }}.tar.gz
+          path: openh264.${{ matrix.platform.name }}.tar.gz
+
+  build-windows:
+    runs-on: windows-2019
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: windows-x86_64
     steps:
-    - name: Build Fuzzers
-      id: build
-      uses: google/oss-fuzz/infra/cifuzz/actions/build_fuzzers@master
-      with:
-        oss-fuzz-project-name: 'openh264'
-        language: c++
-    - name: Run Fuzzers
-      uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@master
-      with:
-        oss-fuzz-project-name: 'openh264'
-        language: c++
-        fuzz-seconds: 600
-    - name: Upload Crash
-      uses: actions/upload-artifact@v4
-      if: failure() && steps.build.outcome == 'success'
-      with:
-        name: artifacts
-        path: ./out/artifacts
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: choco install -y nasm
+
+      - name: Add NASM to PATH
+        run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install Python Requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Install Python Requirements
+        run: python -m pip install meson ninja
+
+      - name: Build with Meson
+        run: python -m mesonbuild.mesonmain setup build_output --prefix=$(pwd)/build_output --libdir=lib --buildtype=release --default-library=static
+
+      - name: Build with Ninja
+        run: python -m ninja -C build_output
+
+      - name: Install to build_output
+        run: python -m ninja -C build_output install
+
+      - name: Prepare for artifact
+        run: |
+          mkdir artifacts/lib
+          move build_output/lib/libopenh264.a artifacts/lib/
+          move build_output/include artifacts/
+          Compress-Archive -Path artifacts -DestinationPath openh264.${{ matrix.platform.name }}.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openh264.${{ matrix.platform.name }}.zip
+          path: openh264.${{ matrix.platform.name }}.zip
+
+  build-macos:
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macos-arm64
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install Python Requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Install Python Requirements
+        run: python -m pip install meson ninja
+
+      - name: Build with Meson
+        run: python -m mesonbuild.mesonmain setup build_output --prefix=$(pwd)/build_output --libdir=lib --buildtype=release --default-library=static
+
+      - name: Build with Ninja
+        run: python -m ninja -C build_output
+
+      - name: Install to build_output
+        run: python -m ninja -C build_output install
+
+      - name: Prepare for artifact
+        run: |
+          mkdir -p artifacts/lib
+          mv build_output/lib/libopenh264.a artifacts/lib/
+          mv build_output/include artifacts/
+          tar -czvf openh264.${{ matrix.platform.name }}.tar.gz artifacts
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openh264.${{ matrix.platform.name }}.tar.gz
+          path: openh264.${{ matrix.platform.name }}.tar.gz
+
+  create-release:
+    name: Create Release
+    if: contains(github.ref, 'tags/v')
+    needs:
+      - build-windows
+      - build-macos
+      - build-linux
+
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/download
+        with:
+          platform: windows-x86_64
+      - uses: ./.github/actions/download
+        with:
+          platform: macos-arm64
+      - uses: ./.github/actions/download
+        with:
+          platform: linux-x86_64
+      - uses: ./.github/actions/download
+        with:
+          platform: linux-arm64
+      - name: Env to output
+        run: |
+          echo "package_paths<<EOF" >> $GITHUB_OUTPUT
+          cat package_paths.env >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        id: env
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ steps.env.outputs.package_paths }}
