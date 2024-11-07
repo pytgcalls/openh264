@@ -9,14 +9,18 @@ on:
     tags:
       - "*"
 jobs:
-  build-linux:
+  build:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         platform:
           - name: linux-x86_64
+            cross-file: ""
           - name: linux-arm64
+            cross-file: cross_linux_arm64.meson
+          - name: windows-x86_64
+            cross-file: cross_win_x86_64.meson
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
@@ -33,6 +37,9 @@ jobs:
           if [[ "${{ matrix.platform.name }}" == "linux-arm64" ]]; then
           sudo apt-get install -qq g++-aarch64-linux-gnu qemu-user
           fi
+          if [[ "${{ matrix.platform.name }}" == "windows-x86_64" ]]; then
+          sudo apt-get install -qq mingw-w64 gcc-mingw-w64
+          fi
 
       - name: Install Python Requirements
         run: python -m pip install meson ninja
@@ -42,10 +49,10 @@ jobs:
         run: |
           python -m mesonbuild.mesonmain setup build_output --prefix=$(pwd)/build_output --libdir=lib --buildtype=release --default-library=static
 
-      - name: Configure with Meson (arm64)
-        if: matrix.platform.name == 'linux-arm64'
+      - name: Configure with Cross Compile Meson
+        if: matrix.platform.name == 'linux-arm64' || matrix.platform.name == 'windows-x86_64'
         run: |
-          python -m mesonbuild.mesonmain setup build_output --cross-file cross_arm64.ini --prefix=$(pwd)/build_output --libdir=lib --buildtype=release --default-library=static
+          python -m mesonbuild.mesonmain setup build_output --cross-file "${{ matrix.platform.cross-file }}" --prefix=$(pwd)/build_output --libdir=lib --buildtype=release --default-library=static
 
       - name: Build with Ninja
         run: python -m ninja -C build_output
@@ -56,7 +63,11 @@ jobs:
       - name: Prepare for artifact
         run: |
           mkdir -p artifacts/lib
+          if [[ "${{ matrix.platform.name }}" == "windows-x86_64" ]]; then
+          mv build_output/lib/libopenh264.a artifacts/lib/openh264.lib
+          else
           mv build_output/lib/libopenh264.a artifacts/lib/
+          fi
           mv build_output/include artifacts/
           tar -czvf openh264.${{ matrix.platform.name }}.tar.gz artifacts
 
@@ -65,58 +76,6 @@ jobs:
         with:
           name: openh264.${{ matrix.platform.name }}.tar.gz
           path: openh264.${{ matrix.platform.name }}.tar.gz
-
-  build-windows:
-    runs-on: windows-2019
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - name: windows-x86_64
-    steps:
-      - name: Check out the repo
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: choco install -y nasm
-
-      - name: Add NASM to PATH
-        run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
-
-      - name: Install Python Requirements
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install meson ninja
-
-      - name: Install Python Requirements
-        run: python -m pip install meson ninja
-
-      - name: Build with Meson
-        run: python -m mesonbuild.mesonmain setup build_output --prefix=$(pwd)/build_output --libdir=lib --buildtype=release --default-library=static
-
-      - name: Build with Ninja
-        run: python -m ninja -C build_output
-
-      - name: Install to build_output
-        run: python -m ninja -C build_output install
-
-      - name: Prepare for artifact
-        run: |
-          mkdir artifacts/lib
-          move build_output/lib/libopenh264.a artifacts/lib/
-          move build_output/include artifacts/
-          Compress-Archive -Path artifacts -DestinationPath openh264.${{ matrix.platform.name }}.zip
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: openh264.${{ matrix.platform.name }}.zip
-          path: openh264.${{ matrix.platform.name }}.zip
 
   build-macos:
     runs-on: macos-14
@@ -173,9 +132,8 @@ jobs:
     name: Create Release
     if: contains(github.ref, 'tags/v')
     needs:
-      - build-windows
+      - build
       - build-macos
-      - build-linux
 
     runs-on: ubuntu-20.04
     steps:
