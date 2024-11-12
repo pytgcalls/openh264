@@ -10,13 +10,17 @@ on:
       - "*"
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.platform.host }}
     strategy:
       fail-fast: false
       matrix:
         platform:
           - name: linux-x86_64
+            arch: x86_64
+            host: ubuntu-latest
           - name: linux-arm64
+            arch: arm64
+            host: arm64-server
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
@@ -26,32 +30,23 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -qq nasm
-          if [[ "${{ matrix.platform.name }}" == "linux-arm64" ]]; then
-          sudo apt-get install -qq g++-aarch64-linux-gnu qemu-user
-          fi
-
-      - name: Install Python Requirements
-        run: python -m pip install meson ninja
-
-      - name: Configure with Meson
-        if: matrix.platform.name == 'linux-x86_64'
-        run: |
-          python -m mesonbuild.mesonmain setup build_output --prefix=$(pwd)/build_output --libdir=lib --buildtype=release --default-library=static
-
-      - name: Configure with Meson (arm64)
+      - name: Set up QEMU
         if: matrix.platform.name == 'linux-arm64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Docker Build
         run: |
-          python -m mesonbuild.mesonmain setup build_output --cross-file cross_arm64.ini --prefix=$(pwd)/build_output --libdir=lib --buildtype=release --default-library=static
-
-      - name: Build with Ninja
-        run: python -m ninja -C build_output
-
-      - name: Install to build_output
-        run: python -m ninja -C build_output install
+          docker run -v $(pwd):/app -w /app ghcr.io/pytgcalls/ntgcalls/${{ matrix.platform.arch }}:latest bash -c "
+          yum install -y nasm
+          python3.12 -m venv venv
+          source venv/bin/activate
+          python -m pip install meson ninja --root-user-action=ignore
+          python -m mesonbuild.mesonmain setup build_output --prefix=/app/build_output --libdir=lib --buildtype=release --default-library=static 
+          python -m ninja -C build_output
+          python -m ninja -C build_output install
+          chown -R $(id -u):$(id -g) build_output"
 
       - name: Prepare for artifact
         run: |
